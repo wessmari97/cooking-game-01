@@ -465,12 +465,13 @@ function drawHud(ctx, world) {
   rr(ctx, barX, 38, barW * (world.dayLeft / DAY_LENGTH), 8, 4);
   ctx.fill();
 
-  // Combo meter with flame.
+  // Combo meter with flame. The text sits clear of the flame so the two
+  // never overlap even at a high combo.
   const cx = VIEW_W - 330;
   const flameScale = 0.55 + Math.min(world.combo, 10) * 0.13;
   drawFlame(ctx, cx, 34, flameScale, performance.now() / 1000, 1);
-  text(ctx, `x${world.combo}`, cx + 26, 30, 26, world.combo > 0 ? '#ffd166' : COLORS.dim, 800, 'left');
-  text(ctx, `COMBO ${world.combo}  ·  BEST ${world.bestCombo}`, cx + 26, 48, 11, COLORS.dim, 700, 'left');
+  text(ctx, `x${world.combo}`, cx + 48, 30, 26, world.combo > 0 ? '#ffd166' : COLORS.dim, 800, 'left');
+  text(ctx, `COMBO ${world.combo}  ·  BEST ${world.bestCombo}`, cx + 48, 48, 11, COLORS.dim, 700, 'left');
 
   // Missed orders as X marks.
   for (let i = 0; i < 3; i++) {
@@ -627,7 +628,9 @@ function drawStove(ctx, world, now, dt) {
   ctx.fillStyle = '#2b2f38';
   rr(ctx, stove.x + 10, stove.y + 10, stove.w - 20, stove.h - 20, 12);
   ctx.fill();
-  text(ctx, 'KOMPOR', stove.x + stove.w / 2, stove.y + 34, 16, '#8fa8a0', 800);
+  // Label at the bottom of the panel so it never collides with a dish
+  // name cooking on a burner above it.
+  text(ctx, 'KOMPOR', stove.x + stove.w / 2, stove.y + stove.h - 14, 16, '#8fa8a0', 800);
   const burners = [burnerA, burnerB];
   world.burners.forEach((b, i) => {
     const pos = burners[i];
@@ -653,6 +656,14 @@ function drawStove(ctx, world, now, dt) {
       ctx.stroke();
       const dish = dishById(b.dishId);
       if (dish) {
+        // Dark pill behind the dish name so it reads cleanly over the stove.
+        ctx.save();
+        ctx.font = `800 15px 'Segoe UI', system-ui, sans-serif`;
+        const nameW = ctx.measureText(dish.short).width;
+        ctx.fillStyle = 'rgba(10, 18, 18, 0.75)';
+        rr(ctx, pos.x - nameW / 2 - 10, pos.y - pos.r - 40, nameW + 20, 24, 12);
+        ctx.fill();
+        ctx.restore();
         text(ctx, dish.short, pos.x, pos.y - pos.r - 26, 15, COLORS.cream, 800);
         text(ctx, `${Math.ceil(COOK_TIME - b.t)}s`, pos.x, pos.y, 20, '#ffffff', 800);
       }
