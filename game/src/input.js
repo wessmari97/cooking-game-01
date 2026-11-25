@@ -1,53 +1,33 @@
-// Keyboard and pointer input. Held keys give a steering direction; one-shot presses (start or
-// restart, pause) are queued as bit flags and taken once by the loop, so a press between two
-// frames is never lost and never counted twice.
+// Wok Star — mouse + keyboard input. Converts browser events into logical
+// 1440x900 coordinates and key names, then hands them to the game controller.
 
-export const ACTION_CONFIRM = 1;
-export const ACTION_PAUSE = 2;
+import { VIEW_W, VIEW_H } from './config.js';
 
-const LEFT = new Set(['ArrowLeft', 'KeyA']);
-const RIGHT = new Set(['ArrowRight', 'KeyD']);
-const CONFIRM = new Set(['Space', 'Enter']);
-const PAUSE = new Set(['KeyP', 'Escape']);
+// Map a pointer event to logical game coordinates.
+function toLogical(canvas, event) {
+  const rect = canvas.getBoundingClientRect();
+  const x = ((event.clientX - rect.left) / rect.width) * VIEW_W;
+  const y = ((event.clientY - rect.top) / rect.height) * VIEW_H;
+  return { x, y };
+}
 
-export function createInput(target) {
-  let left = false;
-  let right = false;
-  let actions = 0;
+export function bindInput(canvas, game) {
+  canvas.addEventListener('pointerdown', (event) => {
+    event.preventDefault();
+    const p = toLogical(canvas, event);
+    game.onClick(p.x, p.y);
+  });
 
   window.addEventListener('keydown', (event) => {
-    if (LEFT.has(event.code)) left = true;
-    else if (RIGHT.has(event.code)) right = true;
-    else if (CONFIRM.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_CONFIRM;
-    } else if (PAUSE.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_PAUSE;
-    } else return;
-    event.preventDefault();
-  });
-  window.addEventListener('keyup', (event) => {
-    if (LEFT.has(event.code)) left = false;
-    else if (RIGHT.has(event.code)) right = false;
-  });
-  // A key released while the tab is hidden never sends keyup: let go of everything on blur.
-  window.addEventListener('blur', () => {
-    left = false;
-    right = false;
-  });
-  target.addEventListener('pointerdown', () => {
-    actions |= ACTION_CONFIRM;
+    // Ignore repeats so holding a key does not spam ingredients.
+    if (event.repeat) return;
+    const key = event.key;
+    if (key === ' ' || key.startsWith('Arrow')) event.preventDefault();
+    game.onKey(key);
   });
 
-  return {
-    /** -1 for left, 1 for right, 0 for neither or both. */
-    direction() {
-      return (right ? 1 : 0) - (left ? 1 : 0);
-    },
-    /** The one-shot presses since the last call, as ACTION_* flags. */
-    takeActions() {
-      const taken = actions;
-      actions = 0;
-      return taken;
-    },
-  };
+  // Keep the canvas focused so keys always land here.
+  canvas.setAttribute('tabindex', '0');
+  canvas.addEventListener('pointerdown', () => canvas.focus());
+  canvas.focus();
 }

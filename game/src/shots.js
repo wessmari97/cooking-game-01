@@ -1,79 +1,91 @@
-// The screenshot scenes behind ?shot=start|play|end. Each one plays the real rules forward from a
-// fresh world for a fixed number of steps, steered by a simple autopilot (look ahead each way the
-// paddle could move, keep clear of blocks, chase the lowest coin when that is safe), so the frame
-// is what a short game really looks like and the same seed always gives the same frame.
-import { FIELD, PLAYER, STEP } from './config.js';
-import { EVENT_OVER, KIND_BLOCK } from './world.js';
-import { SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+// Wok Star — screenshot scenes: ?shot=start|play|end|serve&seed=N sets up a
+// deterministic, good-looking frame for each named shot. The play shot is the
+// hero: a full board, a dish mid-assembly, a burner cooking with steam.
 
-const START_SECONDS = 5;
-const PLAY_SECONDS = 26;
-const END_LIMIT_SECONDS = 600;
-/**
- * How far ahead, in seconds, the autopilot checks each way it could move: the play scene's pilot
- * looks well ahead and keeps all its lives; the end scene's looks only a moment ahead, so it is
- * caught out once the blocks speed up, as a hurried player is.
- */
-const HORIZON_PLAY = 0.7;
-const HORIZON_END = 0.25;
-const SAMPLE = 1 / 30;
-const DIRECTIONS = [0, -1, 1];
-/** Extra room, each side, it keeps between the paddle and a block. */
-const MARGIN = 10;
+import { ORDER_TIME } from './config.js';
+import { createWorld, startShift } from './world.js';
 
-/** Seconds until moving in `direction` (-1, 0, 1) runs the paddle into a block; Infinity when it never does. */
-function timeToHit(state, direction, horizon) {
-  const player = state.player;
-  for (let t = SAMPLE; t <= horizon; t += SAMPLE) {
-    const x = Math.min(FIELD.width - player.width, Math.max(0, player.x + direction * PLAYER.speed * t));
-    for (let index = 0; index < state.items.length; index += 1) {
-      const item = state.items[index];
-      if (!item.active || item.kind !== KIND_BLOCK) continue;
-      const y = item.y + item.speed * t;
-      if (y + item.height > player.y && y < player.y + player.height && item.x < x + player.width + MARGIN && item.x + item.width > x - MARGIN) return t;
-    }
-  }
-  return Infinity;
+function ticket(id, dishId, left) {
+  return { id, dishId, left, total: ORDER_TIME, flyOff: 0, flyDir: 1 };
 }
 
-/** Of the safe ways to move, the one toward the lowest coin (or the centre); else the one that is hit last. */
-function autopilot(state, horizon) {
-  const player = state.player;
-  let coin = null;
-  for (let index = 0; index < state.items.length; index += 1) {
-    const item = state.items[index];
-    if (item.active && item.kind !== KIND_BLOCK && (coin === null || item.y > coin.y)) coin = item;
+// Build a fresh world for the given shot name and seed.
+export function worldForShot(shot, seed) {
+  const world = createWorld(seed);
+  if (shot === 'start') {
+    world.mode = 'title';
+    world.best = 87;
+    return world;
   }
-  const target = coin === null ? FIELD.width / 2 : coin.x + coin.width / 2;
-  const centre = player.x + player.width / 2;
-  const wanted = target > centre + 8 ? 1 : target < centre - 8 ? -1 : 0;
-  let best = wanted;
-  let bestTime = timeToHit(state, wanted, horizon);
-  for (let index = 0; index < DIRECTIONS.length && bestTime !== Infinity; index += 1) {
-    const time = timeToHit(state, DIRECTIONS[index], horizon);
-    if (time > bestTime) {
-      bestTime = time;
-      best = DIRECTIONS[index];
-    }
+  if (shot === 'end') {
+    startShift(world);
+    world.time = 180;
+    world.dayLeft = 0;
+    world.coins = 156;
+    world.served = 14;
+    world.combo = 0;
+    world.bestCombo = 6;
+    world.missed = 3;
+    world.best = 156;
+    world.mode = 'over';
+    world.overReason = 'Tiga order hangus — shift berakhir.';
+    world.orders = [];
+    world.plate = ['tea', 'sugar', 'ice', 'lime'];
+    world.plateDish = 'es-teh';
+    return world;
   }
-  return best;
+  if (shot === 'serve') {
+    startShift(world);
+    world.time = 96;
+    world.dayLeft = 84;
+    world.coins = 72;
+    world.served = 7;
+    world.combo = 4;
+    world.bestCombo = 5;
+    world.orders = [
+      ticket(11, 'nasi-goreng', 38),
+      ticket(12, 'es-teh', 22),
+      ticket(13, 'sate-ayam', 14),
+    ];
+    // One ticket just flew off after a serve.
+    world.orders.push({ id: 10, dishId: 'mie-ayam', left: 30, total: ORDER_TIME, flyOff: 0.45, flyDir: 1 });
+    world.plate = ['tea', 'sugar'];
+    world.plateDish = null;
+    world.burners[0] = { dishId: 'sate-ayam', t: 0, state: 'done' };
+    world.burners[1] = { dishId: null, t: 0, state: 'empty' };
+    world.servedFlash = 0.9;
+    world.perfectFlash = 1.0;
+    world.bursts.push({ x: 1260, y: 330, t: 1.3 });
+    world.pops.push({ x: 1260, y: 300, text: '+18', color: '#ffd166', t: 1.1 });
+    world.lastServe = { dishId: 'mie-ayam', coins: 18 };
+    return world;
+  }
+  // Default: play — the hero shot.
+  startShift(world);
+  world.time = 52;
+  world.dayLeft = 128;
+  world.coins = 48;
+  world.served = 4;
+  world.combo = 3;
+  world.bestCombo = 4;
+  world.orders = [
+    ticket(4, 'nasi-goreng', 34),
+    ticket(5, 'mie-ayam', 26),
+    ticket(6, 'es-teh', 18),
+  ];
+  // Nasi Goreng mid-assembly on the plate: rice + egg, chili and kecap to go.
+  world.plate = ['rice', 'egg'];
+  world.plateDish = null;
+  // One burner cooking Mie Ayam, one free.
+  world.burners[0] = { dishId: 'mie-ayam', t: 2.2, state: 'cooking' };
+  world.burners[1] = { dishId: null, t: 0, state: 'empty' };
+  return world;
 }
 
-/**
- * Set `world` to the named scene (start, play or end; any other name is start) and return the
- * screen to draw over it and the best score to show.
- */
-export function stageShot(name, world) {
-  world.reset();
-  if (name !== 'play' && name !== 'end') {
-    for (let index = 0; index < START_SECONDS / STEP; index += 1) world.step(STEP, 0, true);
-    return { screen: SCREEN_TITLE, best: 0 };
-  }
-  const limit = name === 'end' ? END_LIMIT_SECONDS : PLAY_SECONDS;
-  const horizon = name === 'end' ? HORIZON_END : HORIZON_PLAY;
-  for (let index = 0; index < limit / STEP; index += 1) {
-    if (world.step(STEP, autopilot(world.state, horizon), false) & EVENT_OVER) break;
-  }
-  const over = world.state.lives === 0;
-  return { screen: over ? SCREEN_OVER : SCREEN_PLAY, best: world.state.score };
+// Read the shot from the page URL (?shot=...&seed=...). Defaults to play/1.
+export function shotFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const shot = params.get('shot') || 'play';
+  const seed = Number(params.get('seed') || '1') || 1;
+  return { shot, seed };
 }

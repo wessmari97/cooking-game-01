@@ -1,134 +1,348 @@
-// Boot and the one loop: input is read every frame, the world advances in fixed 1/60 s steps
-// (several in a slow frame, none in a fast one), and the renderer paints what is there. The game
-// moves between four screens: title, play, paused and game over.
-//
-// ?seed=N fixes the falling pattern. ?shot=start|play|end (with &seed=N) stages that scene
-// instead of running the loop, paints it twice and sets window.__shotReady for a screenshot.
-import { BEST_KEY, LIVES, STEP } from './config.js';
-import { createRandom } from './random.js';
-import { createWorld, EVENT_HIT, EVENT_OVER } from './world.js';
-import { ACTION_CONFIRM, ACTION_PAUSE, createInput } from './input.js';
-import { createRenderer, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
-import { stageShot } from './shots.js';
+// Wok Star — game loop, wiring, state machine and synthesized sound.
+// No audio files: every beep, ding and sizzle is made with WebAudio.
 
-/** The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped, not replayed. */
-const MAX_FRAME = 0.25;
+import { INGREDIENTS, LAYOUT, SLOT_KEYS, VIEW_H, VIEW_W, slotRect } from './config.js';
+import { bindInput } from './input.js';
+import { draw } from './render.js';
+import { shotFromUrl, worldForShot } from './shots.js';
+import { addIngredient, clearBurnt, clearPlate, createWorld, serve, startCooking, startShift, update } from './world.js';
 
-const params = new URLSearchParams(window.location.search);
-const shot = params.get('shot');
-const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() * 4294967296);
-
+const BEST_KEY = 'wokstar-best';
 const canvas = document.getElementById('game');
-const status = document.getElementById('status');
-const world = createWorld(createRandom(seed));
-const renderer = createRenderer(canvas);
+const statusEl = document.getElementById('status');
+const ctx = canvas.getContext('2d');
 
-function readBest() {
+const inShot = new URLSearchParams(window.location.search).has('shot');
+const { shot, seed } = shotFromUrl();
+const world = inShot ? worldForShot(shot, seed) : createWorld((Date.now() % 2147483647) | 0);
+world.best = Number(localStorage.getItem(BEST_KEY) || '0') || 0;
+
+// ------------------------------------------------------------------ sound
+
+let audio = null;
+let muted = false;
+let sizzleGain = null;
+let sizzleSrc = null;
+
+function ensureAudio() {
+  if (audio) return;
   try {
-    return Number.parseInt(window.localStorage.getItem(BEST_KEY) ?? '0', 10) || 0;
+    audio = new (window.AudioContext || window.webkitAudioContext)();
   } catch {
-    return 0;
+    audio = null;
   }
 }
 
-function saveBest(value) {
-  try {
-    window.localStorage.setItem(BEST_KEY, String(value));
-  } catch {
-    // Storage can be off (private windows): the best score then lasts this visit only.
-  }
+function beep(freq, dur, type = 'sine', vol = 0.16, when = 0) {
+  if (!audio || muted) return;
+  const t0 = audio.currentTime + when;
+  const osc = audio.createOscillator();
+  const gain = audio.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, t0);
+  gain.gain.setValueAtTime(vol, t0);
+  gain.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+  osc.connect(gain).connect(audio.destination);
+  osc.start(t0);
+  osc.stop(t0 + dur + 0.02);
 }
 
-function runShot(name) {
-  const scene = stageShot(name, world);
-  let painted = 0;
-  function paint() {
-    renderer.draw(world.state, scene.screen, scene.best);
-    painted += 1;
-    if (painted < 2) requestAnimationFrame(paint);
-    else window.__shotReady = true;
+const sfx = {
+  click() {
+    beep(660, 0.06, 'square', 0.1);
+  },
+  add() {
+    beep(520, 0.05, 'sine', 0.14);
+    beep(780, 0.06, 'sine', 0.12, 0.04);
+  },
+  wrong() {
+    beep(130, 0.18, 'sawtooth', 0.16);
+    beep(98, 0.2, 'sawtooth', 0.14, 0.05);
+  },
+  ding() {
+    beep(880, 0.12, 'sine', 0.18);
+    beep(1318, 0.22, 'sine', 0.16, 0.09);
+  },
+  coin() {
+    beep(1568, 0.07, 'square', 0.1);
+    beep(2093, 0.14, 'square', 0.1, 0.06);
+  },
+  pop() {
+    beep(300, 0.08, 'triangle', 0.16);
+    beep(600, 0.1, 'triangle', 0.14, 0.05);
+  },
+  burn() {
+    beep(220, 0.25, 'sawtooth', 0.14);
+    beep(165, 0.3, 'sawtooth', 0.12, 0.1);
+  },
+};
+
+function setSizzle(on) {
+  if (!audio || muted) {
+    if (sizzleGain) sizzleGain.gain.value = 0;
+    return;
   }
-  requestAnimationFrame(paint);
-}
-
-function runGame() {
-  const input = createInput(canvas);
-  let screen = SCREEN_TITLE;
-  let best = readBest();
-  let accumulator = 0;
-  let last = performance.now();
-
-  // Screen readers (and anyone watching the page's text) hear the screen changes and each hit.
-  function announce(message) {
-    status.textContent = message;
-  }
-
-  function startGame() {
-    world.reset();
-    accumulator = 0;
-    screen = SCREEN_PLAY;
-    announce(`Playing. ${LIVES} lives.`);
-  }
-
-  function endGame() {
-    screen = SCREEN_OVER;
-    if (world.state.score > best) {
-      best = world.state.score;
-      saveBest(best);
+  if (on && !sizzleSrc) {
+    const len = audio.sampleRate * 1;
+    const buf = audio.createBuffer(1, len, audio.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+    sizzleSrc = audio.createBufferSource();
+    sizzleSrc.buffer = buf;
+    sizzleSrc.loop = true;
+    const filter = audio.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.value = 5200;
+    filter.Q.value = 0.8;
+    sizzleGain = audio.createGain();
+    sizzleGain.gain.value = 0.05;
+    sizzleSrc.connect(filter).connect(sizzleGain).connect(audio.destination);
+    sizzleSrc.start();
+  } else if (!on && sizzleSrc) {
+    try {
+      sizzleSrc.stop();
+    } catch {
+      // Already stopped.
     }
-    announce(`Game over. Score ${world.state.score}. Best ${best}.`);
+    sizzleSrc = null;
+    sizzleGain = null;
   }
+}
 
-  function handleActions() {
-    const actions = input.takeActions();
-    if (actions & ACTION_CONFIRM && (screen === SCREEN_TITLE || screen === SCREEN_OVER)) startGame();
-    else if (actions & ACTION_PAUSE && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
-    } else if (actions & (ACTION_PAUSE | ACTION_CONFIRM) && screen === SCREEN_PAUSED) {
-      screen = SCREEN_PLAY;
-      announce('Playing.');
+// ------------------------------------------------------------------ helpers
+
+function inRect(x, y, r) {
+  return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+}
+
+function inCircle(x, y, c) {
+  const dx = x - c.x;
+  const dy = y - c.y;
+  return dx * dx + dy * dy <= c.r * c.r;
+}
+
+function announce(msg) {
+  if (statusEl) statusEl.textContent = msg;
+}
+
+function saveBest() {
+  if (world.coins > world.best) {
+    world.best = world.coins;
+    try {
+      localStorage.setItem(BEST_KEY, String(world.best));
+    } catch {
+      // Storage unavailable: best score just lives for the session.
     }
   }
+}
 
-  function step() {
-    if (screen === SCREEN_TITLE) {
-      world.step(STEP, 0, true);
+// ------------------------------------------------------------------ controller
+
+const game = {
+  onClick(x, y) {
+    ensureAudio();
+    if (audio && audio.state === 'suspended') void audio.resume();
+    if (world.mode === 'title') {
+      if (inRect(x, y, LAYOUT.startBtn)) {
+        sfx.pop();
+        startShift(world);
+        announce('Shift dimulai. Sajikan pesanan secepat kilat!');
+      }
       return;
     }
-    const events = world.step(STEP, input.direction(), false);
-    if (events & EVENT_OVER) endGame();
-    else if (events & EVENT_HIT) announce(world.state.lives === 1 ? 'Hit. 1 life left.' : `Hit. ${world.state.lives} lives left.`);
-  }
-
-  function frame(now) {
-    requestAnimationFrame(frame);
-    accumulator += Math.min((now - last) / 1000, MAX_FRAME);
-    last = now;
-    handleActions();
-    if (screen === SCREEN_TITLE || screen === SCREEN_PLAY) {
-      while (accumulator >= STEP && (screen === SCREEN_TITLE || screen === SCREEN_PLAY)) {
-        step();
-        accumulator -= STEP;
+    if (world.mode === 'over') {
+      if (inRect(x, y, LAYOUT.restartBtn)) {
+        sfx.pop();
+        startShift(world);
+        announce('Shift baru dimulai.');
       }
-    } else {
-      accumulator = 0;
+      return;
     }
-    renderer.draw(world.state, screen, best);
+    if (world.mode === 'paused') {
+      world.mode = 'playing';
+      announce('Lanjut masak.');
+      return;
+    }
+    // Playing: clear button.
+    if (inRect(x, y, LAYOUT.clearBtn)) {
+      if (clearPlate(world)) sfx.click();
+      return;
+    }
+    // Burnt burner: click to toss it.
+    const burners = [LAYOUT.burnerA, LAYOUT.burnerB];
+    for (let i = 0; i < 2; i++) {
+      if (inCircle(x, y, burners[i]) && world.burners[i].state === 'burnt') {
+        if (clearBurnt(world, i)) sfx.click();
+        return;
+      }
+    }
+    // Serving window.
+    if (inRect(x, y, LAYOUT.window)) {
+      const res = serve(world);
+      if (res.ok) {
+        sfx.ding();
+        sfx.coin();
+        saveBest();
+        announce(`Disajikan! +${res.earned} koin.`);
+      } else if (res.reason === 'no-order') {
+        sfx.wrong();
+        announce('Tidak ada order untuk hidangan ini.');
+      } else {
+        sfx.click();
+      }
+      return;
+    }
+    // Stove: start cooking.
+    if (inRect(x, y, LAYOUT.stove)) {
+      const res = startCooking(world);
+      if (res.ok) {
+        sfx.add();
+        announce('Memasak…');
+      } else if (res.reason === 'busy') {
+        sfx.wrong();
+      }
+      return;
+    }
+    // Ingredient slots.
+    for (let i = 0; i < INGREDIENTS.length; i++) {
+      if (inRect(x, y, slotRect(i))) {
+        const res = addIngredient(world, INGREDIENTS[i].id);
+        if (res.ok) {
+          sfx.add();
+          if (res.dish) {
+            sfx.ding();
+            announce('Piring lengkap! Siap dimasak atau disajikan.');
+          }
+        } else if (res.reason === 'wrong') {
+          sfx.wrong();
+          announce('Bahan salah untuk hidangan ini.');
+        } else if (res.reason === 'full') {
+          sfx.click();
+        }
+        return;
+      }
+    }
+  },
+
+  onKey(key) {
+    ensureAudio();
+    if (audio && audio.state === 'suspended') void audio.resume();
+    if (key === 'm' || key === 'M') {
+      muted = !muted;
+      if (muted) setSizzle(false);
+      announce(muted ? 'Suara mati.' : 'Suara hidup.');
+      return;
+    }
+    if (world.mode === 'title') {
+      if (key === 'Enter' || key === ' ') {
+        sfx.pop();
+        startShift(world);
+      }
+      return;
+    }
+    if (world.mode === 'over') {
+      if (key === 'r' || key === 'R' || key === 'Enter') {
+        sfx.pop();
+        startShift(world);
+      }
+      return;
+    }
+    if (key === 'p' || key === 'P') {
+      world.mode = world.mode === 'paused' ? 'playing' : 'paused';
+      sfx.click();
+      announce(world.mode === 'paused' ? 'Jeda.' : 'Lanjut masak.');
+      return;
+    }
+    if (world.mode !== 'playing') return;
+    if (key === 'r' || key === 'R') {
+      startShift(world);
+      return;
+    }
+    if (key === ' ') {
+      const res = startCooking(world);
+      if (res.ok) sfx.add();
+      else if (res.reason === 'busy') sfx.wrong();
+      return;
+    }
+    if (key === 'Enter') {
+      const res = serve(world);
+      if (res.ok) {
+        sfx.ding();
+        sfx.coin();
+        saveBest();
+      } else if (res.reason === 'no-order') {
+        sfx.wrong();
+      }
+      return;
+    }
+    if (key === 'Backspace') {
+      if (clearPlate(world)) sfx.click();
+      return;
+    }
+    const slot = SLOT_KEYS.indexOf(key);
+    if (slot >= 0 && slot < INGREDIENTS.length) {
+      const res = addIngredient(world, INGREDIENTS[slot].id);
+      if (res.ok) {
+        sfx.add();
+        if (res.dish) sfx.ding();
+      } else if (res.reason === 'wrong') {
+        sfx.wrong();
+      }
+    }
+  },
+};
+
+// Hover highlight for the counter slots.
+canvas.addEventListener('pointermove', (event) => {
+  const rect = canvas.getBoundingClientRect();
+  const x = ((event.clientX - rect.left) / rect.width) * VIEW_W;
+  const y = ((event.clientY - rect.top) / rect.height) * VIEW_H;
+  world.hoverSlot = -1;
+  for (let i = 0; i < INGREDIENTS.length; i++) {
+    if (inRect(x, y, slotRect(i))) {
+      world.hoverSlot = i;
+      break;
+    }
   }
+});
 
-  // Leaving the tab pauses a running game rather than letting blocks fall unseen.
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
-    }
-  });
+bindInput(canvas, game);
 
-  announce('Block Dodger. Press Space or click to start.');
+// ------------------------------------------------------------------ loop
+
+function resize() {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  canvas.width = VIEW_W * dpr;
+  canvas.height = VIEW_H * dpr;
+  canvas.style.width = '100vw';
+  canvas.style.height = '100vh';
+}
+window.addEventListener('resize', resize);
+resize();
+
+let last = performance.now();
+let wasBurnt = false;
+
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  const t = now / 1000;
+  if (!inShot && world.mode === 'playing') {
+    const burntBefore = world.burners.some((b) => b.state === 'burnt');
+    update(world, dt);
+    const burntNow = world.burners.some((b) => b.state === 'burnt');
+    if (burntNow && !burntBefore) sfx.burn();
+    if (world.mode === 'over') saveBest();
+  }
+  // Sizzle while any burner cooks.
+  const cooking = world.mode === 'playing' && world.burners.some((b) => b.state === 'cooking');
+  setSizzle(cooking);
+  wasBurnt = world.burners.some((b) => b.state === 'burnt');
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  draw(ctx, world, t, dt);
   requestAnimationFrame(frame);
 }
 
-if (shot) runShot(shot);
-else runGame();
+announce('Wok Star. Tekan Enter atau klik Mulai Shift untuk bermain.');
+requestAnimationFrame(frame);
